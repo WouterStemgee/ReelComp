@@ -91,6 +91,7 @@ class TikTokCollector:
         self.file_manager = file_manager or FileManager()
         self.api = None
         self.initialized = False
+        self.logger = logger
         self.video_id_patterns = [
             r'https?://(?:www\.)?tiktok\.com/@[\w.-]+/video/(\d+)',
             r'https?://(?:m\.)?tiktok\.com/v/(\d+)',
@@ -101,32 +102,27 @@ class TikTokCollector:
         """Initialize the TikTok API."""
         try:
             if not self.initialized:
-                # For TikTokApi v7.0.0, initialization is different
-                logger.info("Initializing TikTokApi v7.0.0")
-                self.api = TikTokApi()
+                # For TikTokApi v7.1.0
+                logger.info("Initializing TikTokApi v7.1.0")
                 
                 # Create a temporary data directory if it doesn't exist
                 data_dir = Path("./data/tiktok_api")
                 data_dir.mkdir(parents=True, exist_ok=True)
                 
-                # The API requires browser data to be accessible
-                ms_tokens = None
-                if self.tiktok_config.ms_token:
-                    ms_tokens = [self.tiktok_config.ms_token]
+                # Initialize the API
+                self.api = TikTokApi()
                 
-                # In v7.0.0, session IDs are handled as cookies, not as a direct parameter
-                cookies = None
-                if self.tiktok_config.session_id:
-                    cookies = [{"msToken": self.tiktok_config.ms_token if self.tiktok_config.ms_token else "",
-                              "sessionid": self.tiktok_config.session_id}]
-                
-                # In v7.0.0, 'proxies' is a list, not 'proxy'
+                # Create sessions with proper browser emulation
                 await self.api.create_sessions(
-                    num_sessions=1, 
-                    headless=True,
-                    ms_tokens=ms_tokens,
-                    cookies=cookies,
-                    browser="chromium"
+                    num_sessions=1,
+                    headless=False,
+                    ms_tokens=[self.tiktok_config.ms_token] if hasattr(self.tiktok_config, 'ms_token') else None,
+                    cookies=[{
+                        'name': 'sessionid',
+                        'value': self.tiktok_config.session_id if hasattr(self.tiktok_config, 'session_id') else None
+                    }] if hasattr(self.tiktok_config, 'session_id') else None,
+                    browser="chromium",
+                    sleep_after=3
                 )
                 
                 self.initialized = True
@@ -134,8 +130,21 @@ class TikTokCollector:
         
         except Exception as e:
             logger.error(f"Error initializing TikTok API: {str(e)}")
+            if self.api:
+                await self.cleanup()
             raise
-    
+
+    async def cleanup(self) -> None:
+        """Cleanup TikTok API resources."""
+        try:
+            if self.api:
+                await self.api.close_sessions()
+                self.api = None
+                self.initialized = False
+                self.logger.debug("TikTok API cleaned up successfully")
+        except Exception as e:
+            self.logger.error(f"Error during TikTok API cleanup: {str(e)}")
+
     def _extract_video_id(self, url: str) -> Optional[str]:
         """
         Extract video ID from a TikTok URL.
@@ -166,63 +175,46 @@ class TikTokCollector:
         """
         return f"https://www.tiktok.com/@placeholder/video/{video_id}"
     
-    async def _get_video_info(self, video_id: str, original_url: str = None) -> Optional[VideoMetadata]:
-        """
-        Get video information from TikTok API.
-        
-        Args:
-            video_id: TikTok video ID
-            original_url: Original TikTok URL
-            
-        Returns:
-            VideoMetadata object if successful, None otherwise
-        """
+    async def _get_video_info(self, video_id: str, original_url: str = None) -> VideoMetadata:
+        """Get video information from TikTok API."""
+        if not self.api:
+            raise Exception("TikTok API not initialized")
+
         try:
-            # Ensure API is initialized
-            if not self.initialized:
-                await self._initialize_api()
-            
-            # Get video by ID
-            logger.debug(f"Getting info for video: {video_id}")
-            
-            # In TikTokApi v7.0.0, we need to use the URL
-            video_url = original_url if original_url else self._construct_video_url(video_id)
-            
-            # Create a video object with the URL
-            video_obj = self.api.video(url=video_url)
-            
-            # Get the video info
-            video_data = await video_obj.info()
+            # Construct the video URL if not provided
+            if not original_url:
+                original_url = f"https://www.tiktok.com/video/{video_id}"
+
+            # Get video data using TikTokApi v7.1.0 method
+            video = self.api.video(url=original_url)
+            video_data = await video.info()
             
             if not video_data:
-                logger.error(f"Failed to get video info for ID: {video_id}")
-                return None
+                raise Exception(f"Failed to get video data for ID: {video_id}")
+
+            # Extract video information from the response
+            author = video_data.get('author', {}).get('uniqueId', '')
+            desc = video_data.get('desc', '')
+            create_time = video_data.get('createTime', 0)
+            duration = video_data.get('video', {}).get('duration', 0)
+            height = video_data.get('video', {}).get('height', 0)
+            width = video_data.get('video', {}).get('width', 0)
+            cover = video_data.get('video', {}).get('cover', '')
+            download_url = video_data.get('video', {}).get('downloadAddr', '')
+            play_url = video_data.get('video', {}).get('playAddr', '')
             
-            # Extract video details, the structure is different in v7
-            author = video_data.get("author", {}).get("uniqueId", "")
-            desc = video_data.get("desc", "")
-            create_time = video_data.get("createTime", 0)
+            # Music information
+            music_author = video_data.get('music', {}).get('authorName', '')
+            music_title = video_data.get('music', {}).get('title', '')
             
-            video_info = video_data.get("video", {})
-            duration = video_info.get("duration", 0)
-            height = video_info.get("height", 0)
-            width = video_info.get("width", 0)
-            cover = video_info.get("cover", "")
-            download_url = video_info.get("downloadAddr", "")
-            play_url = video_info.get("playAddr", "")
-            
-            music_info = video_data.get("music", {})
-            music_author = music_info.get("authorName", "")
-            music_title = music_info.get("title", "")
-            
-            stats = video_data.get("stats", {})
-            likes = stats.get("diggCount", 0)
-            shares = stats.get("shareCount", 0)
-            comments = stats.get("commentCount", 0)
-            views = stats.get("playCount", 0)
-            
-            # Create metadata object
-            metadata = VideoMetadata(
+            # Statistics
+            stats = video_data.get('stats', {})
+            likes = stats.get('diggCount', 0)
+            shares = stats.get('shareCount', 0)
+            comments = stats.get('commentCount', 0)
+            views = stats.get('playCount', 0)
+
+            return VideoMetadata(
                 id=video_id,
                 author=author,
                 desc=desc,
@@ -239,15 +231,12 @@ class TikTokCollector:
                 shares=shares,
                 comments=comments,
                 views=views,
-                url=video_url
+                url=original_url
             )
-            
-            logger.debug(f"Successfully retrieved metadata for video {video_id}")
-            return metadata
-            
+
         except Exception as e:
-            logger.error(f"Error getting video info for {video_id}: {str(e)}")
-            return None
+            self.logger.error(f"Failed to get video info for {video_id}: {str(e)}")
+            raise
     
     def _download_with_ytdlp(self, url: str, output_path: str) -> bool:
         """
@@ -364,10 +353,10 @@ class TikTokCollector:
                     url_to_id[url] = video_id
             
             if not url_to_id:
-                logger.error("No valid TikTok URLs provided")
+                self.logger.error("No valid TikTok URLs provided")
                 return []
             
-            logger.info(f"Extracted {len(url_to_id)} video IDs from URLs")
+            self.logger.info(f"Extracted {len(url_to_id)} video IDs from URLs")
             
             # Get metadata and download videos
             results = []
@@ -380,19 +369,15 @@ class TikTokCollector:
                     if download_path:
                         results.append(metadata)
             
-            logger.info(f"Successfully downloaded {len(results)} videos")
+            self.logger.info(f"Successfully downloaded {len(results)} videos")
             return results
             
         except Exception as e:
-            logger.error(f"Error downloading videos: {str(e)}")
+            self.logger.error(f"Error downloading videos: {str(e)}")
             return []
         finally:
-            # Close the API sessions when done
-            if self.initialized and self.api:
-                try:
-                    await self.api.close_sessions()
-                except Exception as e:
-                    logger.warning(f"Error closing TikTok API sessions: {str(e)}")
+            # Clean up the API resources
+            await self.cleanup()
 
 
 # Example usage

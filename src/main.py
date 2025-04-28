@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+import nest_asyncio
 from loguru import logger
 
 from src.thumbnail_generator.generator import ThumbnailGenerator
@@ -26,6 +27,8 @@ from src.video_processing.shorts_generator import ShortsGenerator
 from src.youtube_uploader.uploader import YouTubeUploader
 from src.url_collector.tiktok_scraper import save_processed_urls
 
+# Apply nest_asyncio to allow nested event loops
+nest_asyncio.apply()
 
 class CompilationApp:
     """Main application class for TikTok video compilation automation."""
@@ -291,41 +294,61 @@ def parse_args():
 
 
 async def main():
-    """Main entry point for the application."""
-    # Parse command-line arguments
-    args = parse_args()
-    
-    # Setup logging
-    setup_logger(args.log_level)
-    
-    # Initialize the application
-    app = CompilationApp(args.config)
-    
-    # Run the pipeline
-    compilation_path, shorts_paths = await app.run(
-        urls_file=args.urls,
-        urls=args.url_list,
-        title=args.title,
-        description=args.description,
-        upload_to_youtube=args.upload,
-        generate_shorts=args.generate_shorts,
-        compilation_short=args.compilation_short,
-        max_videos=args.max_videos,
-        processed_db_file=args.processed_db
-    )
-    
-    if compilation_path:
-        logger.info(f"Compilation pipeline completed successfully. Output: {compilation_path}")
-        if shorts_paths:
-            if args.compilation_short:
-                logger.info(f"Generated YouTube Short from compilation: {shorts_paths[0]}")
+    """Main entry point."""
+    try:
+        # Parse command-line arguments
+        args = parse_args()
+        
+        # Setup logging
+        setup_logger(args.log_level)
+        
+        # Initialize application
+        app = CompilationApp(args.config)
+        
+        # Run the pipeline
+        try:
+            compilation_path, shorts_paths = await app.run(
+                urls_file=args.urls,
+                urls=args.url_list,
+                title=args.title,
+                description=args.description,
+                upload_to_youtube=args.upload,
+                generate_shorts=args.generate_shorts,
+                compilation_short=args.compilation_short,
+                max_videos=args.max_videos,
+                processed_db_file=args.processed_db
+            )
+            
+            if compilation_path:
+                logger.success("Compilation pipeline completed successfully!")
+                logger.info(f"Compilation video: {compilation_path}")
+                if shorts_paths:
+                    logger.info(f"Generated {len(shorts_paths)} YouTube Shorts")
             else:
-                logger.info(f"Generated {len(shorts_paths)} YouTube Shorts from individual videos: {', '.join(shorts_paths)}")
-        return 0
-    else:
-        logger.error("Compilation pipeline failed")
-        return 1
+                logger.error("Compilation pipeline failed")
+                sys.exit(1)
+                
+        finally:
+            # Ensure cleanup of TikTok API resources
+            if app.tiktok_collector:
+                await app.tiktok_collector.cleanup()
+            
+    except Exception as e:
+        logger.error(f"Compilation pipeline failed: {str(e)}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    try:
+        # Get or create event loop
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        # Run the main function
+        loop.run_until_complete(main())
+    finally:
+        # Clean up the event loop
+        loop.close()

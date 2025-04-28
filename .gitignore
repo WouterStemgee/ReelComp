@@ -35,6 +35,7 @@ htmlcov/
 
 # Virtual Environment
 venv/
+venv311/
 env/
 ENV/
 
@@ -104,3 +105,4 @@ tiktok_urls.txt
 tiktok_weekly.sh
 tiktok_weekly.sh.example
 final_cleanup.sh
+tiktok_urls.screenshot.png
